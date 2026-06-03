@@ -7,7 +7,7 @@ variable "cidr" {
   default = "10.0.0.0/16"
 }
 
-resource "aws_key_pair" "example" {
+resource "aws_key_pair" "example" {    # Creating key pair because we need to login via SSH and it requires private key (ex: ssh -i private key)
   key_name   = "terraform-demo-abhi"  # Replace with your desired key name
   public_key = file("~/.ssh/id_rsa.pub")  # Replace with the path to your public key file
 }
@@ -52,7 +52,7 @@ resource "aws_security_group" "webSg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  ingress {
+  ingress {                                #Ingress = inbound value
     description = "SSH"
     from_port   = 22
     to_port     = 22
@@ -60,7 +60,7 @@ resource "aws_security_group" "webSg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  egress {
+  egress {                                #egress = outbound value
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
