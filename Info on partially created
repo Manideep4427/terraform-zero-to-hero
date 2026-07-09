@@ -1,0 +1,728 @@
+https://chatgpt.com/s/t_6a4f554295a48191a1592467b4deea25
+https://chatgpt.com/s/t_6a4f54c8cee88191935d1af1c90a6554
+https://chatgpt.com/s/t_6a4f5492170c8191a90d3bebb9293670
+
++++++++++++++++++++++==============================================================================
+Yes. The answer depends on **whether Terraform knows about those partially created resources**.
+
+This is a very common interview scenario.
+
+---
+
+# Case 1: Resources were created AND recorded in state ✅
+
+Example:
+
+You ran:
+
+```bash
+terraform apply
+```
+
+It created:
+
+* VPC ✅
+* Subnet ✅
+
+Then it failed before creating the EC2.
+
+State:
+
+```text
+aws_vpc.main
+aws_subnet.public
+```
+
+AWS:
+
+```text
+VPC
+Subnet
+```
+
+Since Terraform knows about them, simply run:
+
+```bash
+terraform destroy
+```
+
+Terraform will delete:
+
+```text
+VPC
+Subnet
+```
+
+No manual work is needed.
+
+---
+
+# Case 2: Resources were created but NOT recorded in state ❌
+
+This is the tricky scenario.
+
+Example:
+
+Terraform starts creating an EC2.
+
+```
+Create EC2
+      ↓
+AWS says SUCCESS
+      ↓
+💥 Laptop crashes
+      ↓
+Terraform never updates state
+```
+
+Now:
+
+State:
+
+```text
+aws_vpc.main
+aws_subnet.public
+```
+
+AWS:
+
+```text
+VPC
+Subnet
+EC2
+```
+
+Terraform doesn't know about the EC2.
+
+If you run:
+
+```bash
+terraform destroy
+```
+
+Terraform deletes:
+
+```text
+VPC
+Subnet
+```
+
+But **EC2 remains**, because it's not in the state.
+
+You now have an **orphan resource**.
+
+---
+
+# How do you delete the orphan?
+
+### Option 1 (Recommended)
+
+Import it first:
+
+```bash
+terraform import aws_instance.web i-0123456789abcdef
+```
+
+Now run:
+
+```bash
+terraform destroy
+```
+
+Terraform deletes everything cleanly.
+
+---
+
+### Option 2
+
+Delete it manually:
+
+```bash
+aws ec2 terminate-instances \
+--instance-ids i-0123456789abcdef
+```
+
+or delete it from the AWS Console.
+
+---
+
+# Case 3: I don't know what was created
+
+This is what most engineers do during a real incident.
+
+### Step 1
+
+Check Terraform state:
+
+```bash
+terraform state list
+```
+
+### Step 2
+
+Check AWS:
+
+```bash
+aws ec2 describe-instances
+aws ec2 describe-vpcs
+aws ec2 describe-subnets
+```
+
+Compare the two.
+
+Anything in AWS but **not** in the state is an orphan.
+
+---
+
+# Interview Scenario
+
+Interviewer:
+
+> Terraform apply was interrupted after creating some resources. You want to clean everything up. What do you do?
+
+Good answer:
+
+> "First, I check the Terraform state with `terraform state list` and compare it with the actual resources in AWS. If the resources are tracked in the state, I use `terraform destroy` to remove them. If some resources exist in AWS but are missing from the state due to the interruption, I either import them into the state and then run `terraform destroy`, or delete those orphaned resources manually using the AWS Console or CLI."
+
+---
+
+# Decision Flow
+
+```text
+terraform apply interrupted
+          │
+          ▼
+Check Terraform State
+(terraform state list)
+          │
+          ▼
+Compare with AWS
+          │
+     ┌────┴────┐
+     │         │
+     ▼         ▼
+Tracked    Not Tracked
+     │         │
+     ▼         ▼
+terraform   Import + Destroy
+destroy     OR Delete Manually
+```
+
+---
+
+## One important point
+
+Many people think:
+
+> **"Interrupted apply = just run `terraform destroy`."**
+
+That is **not always correct**.
+
+`terraform destroy` only deletes **resources that exist in the Terraform state**. If the interruption occurred after AWS created a resource but before Terraform recorded it in the state, `terraform destroy` has no knowledge of that resource and **cannot delete it**. That's why checking the state and comparing it with AWS is a critical troubleshooting step.
+
+
+++++++++++++++++++++++=======================================================================
+This is a very good question, and the answer is **No, not directly**. Restoring an old state file from S3 is **not** a rollback mechanism by itself. In fact, it can be dangerous if you don't understand what it does.
+
+Let's walk through it.
+
+---
+
+# Suppose this was your previous state
+
+Terraform State (Version 1)
+
+```text
+VPC
+Subnet
+```
+
+AWS
+
+```text
+VPC
+Subnet
+```
+
+Everything is in sync.
+
+---
+
+Now you change your Terraform code:
+
+```hcl
+resource "aws_instance" "web" {}
+
+resource "aws_security_group" "web" {}
+```
+
+Run:
+
+```bash
+terraform apply
+```
+
+Terraform starts:
+
+```text
+VPC        ✓
+Subnet     ✓
+Security Group ✓
+EC2 ...
+```
+
+Suppose it crashes.
+
+Now AWS has:
+
+```text
+VPC
+Subnet
+Security Group
+```
+
+Current state (latest version in S3):
+
+```text
+VPC
+Subnet
+Security Group
+```
+
+Everything created before the crash has already been recorded.
+
+---
+
+## Now suppose you restore the OLD state from S3
+
+Old state becomes
+
+```text
+VPC
+Subnet
+```
+
+Terraform now thinks
+
+```text
+Security Group doesn't exist.
+```
+
+But AWS actually has
+
+```text
+VPC
+Subnet
+Security Group
+```
+
+Now run
+
+```bash
+terraform apply
+```
+
+Terraform DOES NOT say
+
+> "Oh, I found an extra Security Group, let me delete it."
+
+Instead it says
+
+> "Security Group is missing from my state, so I'll create it."
+
+If the resource name must be unique, you'll likely get an "AlreadyExists" error. If duplicates are allowed, you may end up with two security groups.
+
+---
+
+# Why?
+
+Terraform compares:
+
+```text
+Desired Configuration
+        vs
+Terraform State
+```
+
+**It does not compare the state against AWS and delete anything that's extra.**
+
+The state file is **Terraform's memory**, not a rollback log.
+
+---
+
+# If you want to return to the previous infrastructure
+
+You must also revert the Terraform configuration.
+
+Suppose today's code is
+
+```hcl
+resource "aws_vpc" "main" {}
+resource "aws_subnet" "public" {}
+resource "aws_security_group" "web" {}
+resource "aws_instance" "web" {}
+```
+
+To go back to the old infrastructure, revert the code to:
+
+```hcl
+resource "aws_vpc" "main" {}
+resource "aws_subnet" "public" {}
+```
+
+Now the desired configuration no longer includes the Security Group or EC2.
+
+If your state still tracks those resources, then:
+
+```bash
+terraform plan
+```
+
+will show:
+
+```text
+- aws_security_group.web will be destroyed
+
+- aws_instance.web will be destroyed
+```
+
+Then:
+
+```bash
+terraform apply
+```
+
+Terraform deletes them.
+
+---
+
+# What if I restore BOTH?
+
+Suppose you restore:
+
+* Old Terraform code ✅
+* Old state file ✅
+
+But AWS still has:
+
+```text
+VPC
+Subnet
+Security Group
+```
+
+Terraform doesn't know about the Security Group because it isn't in the restored state.
+
+So Terraform **will not delete it**.
+
+It becomes an **orphan resource**.
+
+---
+
+# Correct rollback approaches
+
+### Scenario 1: State is correct
+
+If the partially created resources are already in the state:
+
+```bash
+git checkout <previous-commit>   # Restore previous Terraform code
+terraform apply
+```
+
+Terraform sees those resources are no longer desired and destroys them.
+
+---
+
+### Scenario 2: Resources exist in AWS but are NOT in the state
+
+You have two options:
+
+**Option 1 (recommended)**
+
+Import them:
+
+```bash
+terraform import ...
+terraform apply
+```
+
+Terraform can now destroy them if they're no longer in the configuration.
+
+**Option 2**
+
+Delete the orphaned resources manually using the AWS Console or CLI.
+
+---
+
+# What is S3 versioning for then?
+
+S3 versioning is mainly a **disaster recovery mechanism for the state file**, such as:
+
+* Someone accidentally deletes the state file.
+* The state file becomes corrupted.
+* A bad `terraform state rm` or `terraform state mv` operation needs to be undone.
+* You need to recover from accidental state modifications.
+
+It is **not** intended as a way to roll back infrastructure changes after an interrupted apply.
+
+---
+
+## Interview answer
+
+If an interviewer asks:
+
+> "Can you restore a previous Terraform state version from an S3 backend to roll back partially created resources?"
+
+A strong answer is:
+
+> "Not by itself. The Terraform state is only a record of managed resources; restoring an older state does not instruct Terraform to delete newer AWS resources. To roll back infrastructure, I also need to restore the Terraform configuration to the desired previous version and ensure the state accurately reflects the resources. If resources exist in AWS but are missing from the restored state, they become orphaned and must either be imported into the state before Terraform can manage them, or deleted manually."
+
+
+================================================================================================
+You're very close, but there's one important misconception.
+
+> **Terraform does not delete resources just because they exist in AWS and are missing from the state.**
+
+Let's go through your scenario.
+
+---
+
+# Initial state
+
+Terraform code (v1):
+
+```hcl
+resource "aws_vpc" "main" {}
+resource "aws_subnet" "public" {}
+```
+
+State:
+
+```text
+VPC
+Subnet
+```
+
+AWS:
+
+```text
+VPC
+Subnet
+```
+
+Everything matches.
+
+---
+
+# You update the code
+
+Terraform code (v2):
+
+```hcl
+resource "aws_vpc" "main" {}
+resource "aws_subnet" "public" {}
+resource "aws_security_group" "web" {}
+resource "aws_instance" "web" {}
+```
+
+Run:
+
+```bash
+terraform apply
+```
+
+It creates:
+
+* VPC ✅
+* Subnet ✅
+* Security Group ✅
+
+Then it crashes before finishing.
+
+AWS now has:
+
+```text
+VPC
+Subnet
+Security Group
+```
+
+---
+
+# Now you restore BOTH
+
+You restore:
+
+* ✅ Previous Terraform code (v1)
+* ✅ Previous state file (v1)
+
+Now Terraform sees:
+
+**Configuration**
+
+```text
+VPC
+Subnet
+```
+
+**State**
+
+```text
+VPC
+Subnet
+```
+
+**AWS**
+
+```text
+VPC
+Subnet
+Security Group
+```
+
+---
+
+# What does `terraform plan` do?
+
+Terraform refreshes the resources **that are in the state**.
+
+It checks:
+
+```text
+State → AWS
+```
+
+for:
+
+```text
+VPC
+Subnet
+```
+
+It **does not** scan AWS looking for unmanaged resources.
+
+So the plan will most likely be:
+
+```text
+No changes.
+Infrastructure is up-to-date.
+```
+
+The Security Group is **ignored**, because:
+
+* it's not in the configuration, **and**
+* it's not in the state.
+
+Terraform doesn't even know it should exist.
+
+---
+
+# Terraform does NOT say
+
+```text
+AWS has an extra Security Group.
+
+I'll delete it.
+```
+
+It has no way to know whether that Security Group:
+
+* belongs to another Terraform project,
+* was created manually,
+* or is intentionally unmanaged.
+
+Terraform only manages resources that are tracked in its state.
+
+---
+
+# When does Terraform delete a resource?
+
+Terraform deletes a resource only when **all** of these are true:
+
+1. The resource exists in the **state** ✅
+2. The resource is **no longer desired** (removed from the configuration) ✅
+
+Example:
+
+State:
+
+```text
+VPC
+Subnet
+SecurityGroup
+```
+
+Configuration:
+
+```text
+VPC
+Subnet
+```
+
+Plan:
+
+```text
+- aws_security_group.web will be destroyed
+```
+
+Then `terraform apply` deletes it.
+
+---
+
+# Think of the state as Terraform's inventory
+
+Imagine Terraform is a warehouse manager.
+
+Inventory file:
+
+```text
+Laptop
+Mouse
+Keyboard
+```
+
+Someone secretly places a printer in the warehouse.
+
+Actual warehouse:
+
+```text
+Laptop
+Mouse
+Keyboard
+Printer
+```
+
+Manager checks the inventory.
+
+He says:
+
+> "Everything in my inventory is present."
+
+He doesn't remove the printer because **he never knew it was part of his inventory**.
+
+That's exactly how Terraform works.
+
+---
+
+# So, is restoring an old state enough?
+
+❌ No.
+
+Restoring an old state doesn't tell Terraform to delete newer AWS resources.
+
+Those resources simply become **orphaned** (unmanaged).
+
+---
+
+# Interview answer
+
+If an interviewer asks:
+
+> "If I restore an older Terraform state from S3 and an older version of my Terraform code, will `terraform apply` automatically delete resources that were created after that state?"
+
+A good answer is:
+
+> "No. Terraform only manages resources that are recorded in its state. Restoring an older state means Terraform no longer knows about the newer resources, so they become unmanaged. `terraform plan` refreshes and compares only the resources tracked in the state; it does not discover and delete extra resources in AWS. To remove those resources, I would either import them into the state and then let Terraform destroy them, or delete them manually."
+
+This is an important Terraform design principle: **Terraform is not an AWS inventory scanner—it is a state-driven infrastructure manager.**
